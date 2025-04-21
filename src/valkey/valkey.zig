@@ -460,6 +460,8 @@ pub const ValkeyClient = struct {
 
         this.status = .disconnected;
         this.flags.is_reconnecting = true;
+        // Reset authentication status on close to handle HELLO correctly on reconnect
+        this.flags.is_authenticated = false;
 
         // Signal reconnect timer should be started
         this.onValkeyReconnect();
@@ -675,7 +677,10 @@ pub const ValkeyClient = struct {
 
         // For regular commands, get the next command+promise pair from the queue
         var pair = this.in_flight.readItem() orelse {
-            debug("Received response but no promise in queue", .{});
+            // This can happen if we receive a response for a command sent *before*
+            // a disconnect/reconnect cycle, as the in_flight queue is cleared on disconnect.
+            // We should just ignore/discard this stale response.
+            debug("Received response but no promise in queue (likely stale response after reconnect), discarding.", .{});
             return;
         };
 

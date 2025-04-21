@@ -310,9 +310,16 @@ pub const JSValkeyClient = struct {
     }
 
     pub fn onConnectionTimeout(this: *JSValkeyClient) JSC.BunTimer.EventLoopTimer.Arm {
-        debug("onConnectionTimeout", .{});
+        // 在标记定时器或执行任何操作之前检查当前状态。
+        // 这处理了连接在此超时回调执行*之前*刚刚成功的潜在竞争条件。
+        if (this.client.status == .connected) {
+            debug("onConnectionTimeout 触发，但客户端已连接。忽略。", .{});
+            // 定时器实际上已过时，只需解除。不需要 this.deref()，因为我们没有 ref()。
+            return .disarm;
+        }
 
-        // Mark timer as fired
+        debug("onConnectionTimeout (status: {s})", .{@tagName(this.client.status)});
+        // 标记定时器已触发
         this.timer.state = .FIRED;
 
         // Increment ref to ensure 'this' stays alive throughout the function
@@ -331,8 +338,11 @@ pub const JSValkeyClient = struct {
                 this.clientFail(msg, protocol.RedisError.IdleTimeout);
             },
             .disconnected, .connecting => {
-                const msg = std.fmt.bufPrintZ(&buf, "Connection timeout reached after {d}ms", .{this.client.connection_timeout_ms}) catch unreachable;
-                this.clientFail(msg, protocol.RedisError.ConnectionTimeout);
+                // Instead of failing immediately, treat timeout during connection/reconnection
+                // as a connection closure, allowing the standard reconnect logic to handle it.
+                debug("Connection/Reconnect timeout after {d}ms, triggering onClose", .{this.client.connection_timeout_ms});
+                // Simulate a connection close to trigger the reconnect logic if applicable
+                this.client.onClose();
             },
             else => {
                 // No timeout for other states
@@ -390,8 +400,9 @@ pub const JSValkeyClient = struct {
             return;
         };
 
-        // Reset the socket timeout
-        this.resetConnectionTimeout();
+        // 不在这里重置定时器；等待连接在 onValkeyConnect 中完全建立
+        // 并认证后再说。在这里重置可能会不必要地重新启动连接定时器。
+        // this.resetConnectionTimeout();
     }
 
     // Callback for when Valkey client connects
@@ -424,6 +435,11 @@ pub const JSValkeyClient = struct {
         }
 
         this.client.onWritable();
+        // Explicitly disable any existing connection timer first.
+        this.disableConnectionTimeout();
+        // Now reset the timer. This will either set the idle timeout
+        // or effectively keep the timer disabled if idle timeout is 0.
+        this.resetConnectionTimeout();
         this.updatePollRef();
     }
 
